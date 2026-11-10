@@ -1,0 +1,29 @@
+# Python / uv environments
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# Working directories and generated media outputs
+work/
+outputs/
+staging*/
+overlays*/
+
+# CS2 demo archives and recorded/rendered media (never commit personal demos or copyrighted music)
+*.dem
+*.dem.gz
+*.dem.zst
+*.dem.json
+*.zip
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.mp3
+*.wav
+*.ogg
+*.aac

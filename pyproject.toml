@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs2-clip-maker"
+version = "0.1.0"
+description = "Self-contained CS2 highlight video skill & CLI: parse .dem/.zip/.gz/.zst demos, select aces/clutches/1-taps/Deagle highlights, record via CS2+HLAE, decode Opus team voice, and render 9:16/4:5/16:9 MP4s with enlarged top killfeed and info HUD cards."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "demoparser2>=0.41",
+    "av>=14",
+    "pillow>=10",
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "click>=8.1",
+    "rich>=13",
+    "psutil>=5.9",
+    "vdf>=3.4",
+    "tomli-w>=1",
+    "requests>=2.31",
+    "zstandard>=0.22",
+    "arabic-reshaper>=3",
+    "python-bidi>=0.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+cs2-clip-maker = "cs2_clip_maker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
