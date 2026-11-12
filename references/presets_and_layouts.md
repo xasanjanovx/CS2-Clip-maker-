@@ -1,47 +1,31 @@
 # Presets, Tight-Trimming, and Video Layouts
 
-Detailed rules used by [`presets.py`](../src/cs2_clip_maker/presets.py) and [`composer.py`](../src/cs2_clip_maker/composer.py).
+Detailed rules used by [`presets.py`](../src/cs2_clip_maker/presets.py), [`composer.py`](../src/cs2_clip_maker/composer.py), [`killfeed_cutout.py`](../src/cs2_clip_maker/killfeed_cutout.py), and [`template_montage.py`](../src/cs2_clip_maker/template_montage.py).
 
-## Highlight Presets (`--preset`)
+## Signature Vertical Reels Layout (`9:16` Default)
 
-Before preset filtering runs, `parse_demo()` and `presets.py` automatically strip:
-- Warmup / DM periods (`is_warmup_period`, ticks before `begin_new_match`, and any synthetic warmup round with `> 10` deaths).
-- Opening knife rounds (`>= 4` knife or Zeus kills in a round), unless `--preset knife_zeus --include-knife-rounds` is explicitly set.
+All vertical `9:16` (`1080x1920` @ `60.00 fps` CFR) outputs use the user's signature configuration modeled after `https://www.youtube.com/shorts/z0T2CTj0SfU`, with blurred top/bottom background instead of black bars and cut-out red-bordered killfeed pills:
 
-| Preset | Selection Rule | Notes |
+| Region | Coordinates in `1080x1920` | FFmpeg / Processing Rule |
 | :--- | :--- | :--- |
-| `all` | Aces, 4Ks, won 1vX clutches, 3Ks, Deagle 2K+, rapid 2K HS (`<= 3.5s`), 2+ one-taps, knife, Zeus, AWP noscope | Best balanced highlights reel |
-| `aces` | `5+` kills shown in a single clip | Full 5K aces (`<= 60s` span) are preserved by tight-trim; pass `--no-tight-trim` for slow 90s+ rounds |
-| `clutches` | Won `1vX` rounds (`X >= 1`) | Trims trailing post-kill bomb waiting while keeping finish |
-| `deagle` | `>= 2` Desert Eagle kills in round (`>= 1` if `--min-kills 1`) | Great for sharp Deagle reels |
-| `pistols` | `>= 2` pistol kills or MR12 pistol rounds (R1 / R13) | Includes USP-S, Glock, P250, Five-SeveN, Tec-9, CZ75, Deagle |
-| `1taps` | `>= 2` headshots in rapid burst (`<= 4.5s`) or verified 1-hit kills from `player_hurt` | Cross-references `player_hurt` (`<= 1` hit in 3s window before lethal headshot) |
-| `knife_zeus` | `>= 1` Knife, Bayonet, or Zeus x27 kill | Add `--include-knife-rounds` to include match-start knife rounds |
+| **Top Blurred Bar** | `y = 0 .. 378` (`378 px` tall) | `crop=1400:986:200:0,scale=1080:1920,boxblur=30:8,eq=brightness=-0.10` (NEVER black bars) |
+| **Center Gameplay Window (`4:3` Vertical Stretch)** | `x = 0 .. 1080`, `y = 378 .. 1502` (`1080x1124`) | `crop=1400:986:200:0,scale=1080:1124:flags=lanczos` overlaid at `0:378` (crops out bottom demo bar `y >= 986` and applies vertical stretch matching `z0T2CTj0SfU`) |
+| **Bottom Blurred Bar** | `y = 1502 .. 1920` (`418 px` tall) | Filled by the continuous `1080x1920` blurred background (`boxblur=30:8`) |
+| **Cut-Out Killfeed Pills (`--killfeed`)** | Stacked in top blurred bar above `y = 378` (`y_bot = 360`, `x_right = 1048`) | Extracted via `detect_killfeed_pills_pro()` along the player's red pill border `(rx0, ry0, rx1, ry1)`, scaled `1.48x` with Lanczos, with zero surrounding wall zoom |
+| **Bottom HUD Info Card (`--info-cards`)** | `y = 1545` (inside bottom blurred bar) | Optional translucent badge card (`--no-info-cards` disables it for clean music montages) |
 
-## Tight-Trimming Algorithm (`--tight-trim` / `--no-tight-trim`)
+## Cut-Out Red-Bordered Killfeed Pill Detector (`killfeed_cutout.py`)
 
-Long CS2 rounds often have 35-55 seconds of rotation or saving between an early entry frag and a final 3K. When `--tight-trim` is active (default):
+Instead of cropping and zooming a large `620x230` corner rectangle of the map wall, `detect_killfeed_pills_pro()` scans the Panorama killfeed region (`x = 1350..1918, y = 64..260`) for the local player's 2px horizontal red border ridges (`R - G` contrast between border rows separated by `dy = 28..32 px` and the adjacent interior/exterior rows):
+- Works reliably across bright sky, dark shadows, terracotta roofs, orange walls, and red damage vignettes.
+- Rejects teammate/enemy kills that do not have the player's red border.
+- Cuts out each individual pill `(rx0, ry0, rx1, ry1)` cleanly and stacks them at `y_bot = 360, x_right = 1048`.
 
-1. Kills within a `(player, round)` moment are split into dense clusters whenever consecutive kills exceed `--tight-gap-sec` (default `18.0s`).
-2. Each cluster is bounded within `--max-clip-sec` (default `34.0s`) via a sliding window maximizing kills, headshots, one-taps, specials, and shortest action span.
-3. For won clutches where the last enemy dies early and a 30s bomb wait follows, the tail stops shortly after the final clutch kill/defuse (`~4.5s`) rather than idling until `round_end`.
-4. `badge` and `subtitle` reflect `kills_shown` and `headshots_shown` (honest labels: if an opening kill 45s earlier was trimmed out of a 4K, the card says `3K`).
+## 1-to-1 Template Montage Rules (`template_montage.py`)
 
-## Aspect Ratios and Overlays (`--aspect`)
-
-Source captures from HLAE are `1920x1080` at `60fps` (non-1080p inputs are normalized automatically).
-
-| Layout | Output Size | Main Viewport | Enlarged Top Killfeed (`--killfeed`) | Bottom HUD Info Card (`--info-cards`) |
-| :--- | :--- | :--- | :--- | :--- |
-| `9:16` | `1080x1920` | `1080x608` centered at `y=656` over blurred dimmed background | Crops top-right `560x130+1340+50` -> scales `962x223`, centered at `y=415` (`white@0.35` frame), activates at `first_kill_offset - 0.35s` | Translucent card at `y=1350`, gold outline for Aces/Clutches/Knife, cyan for multi-kills |
-| `9:16-clean` | `1080x1920` | `1080x608` centered at `y=656` | Disabled | Same as `9:16` (disable with `--no-info-cards`) |
-| `4:5` | `1080x1350` | `1080x608` centered at `y=371` | Crops top-right `560x130+1340+50` -> scales `840x195` at `y=130` | Centered at `y=1030` |
-| `16:9` | `1920x1080` | Native `1920x1080` fullscreen | Uses native in-game top-right killfeed (extra overlay not needed) | Centered banner near bottom (`y=925`) |
-
-## Audio Mixing Graph
-
-Per clip in [`composer.py`](../src/cs2_clip_maker/composer.py):
-- **Game audio (`0:a`):** `volume=1.05`, stereo 48 kHz.
-- **Voice stem (`voice_wav`):** `demoparser2.parse_voice()` Opus packets decoded per speaker via PyAV `48000 Hz`, `highpass=f=100`, `volume=2.5`, `alimiter=limit=0.95`. Falls back to silent WAV if demo contains no voice data.
-- **Music (`--music`):** Continuous offset tracked across sequential clips modulo track length (`atrim`), `volume=0.24`, `afade` `0.3s` in / `0.4s` out.
-- **Master bus:** `amix=inputs=2|3:duration=first:normalize=0`, `alimiter=limit=0.96`.
+1. **Zero Duplicate Moments**: Every beat/kill slot (`pov_kill`) is mapped to a distinct `(demo, round, kill_tick)`.
+2. **Best Highlights Priority**: Ranks rounds by multi-kill count (`5K > 4K > 3K`), pistol 1-tap headshots (`USP-S` / `Deagle` 3K 1-taps), AWP multi-kills/noscopes, and won clutches.
+3. **1-to-1 Matched 3rd-Person Victim Deaths**:
+   - Attacker POV is recorded with `spec_mode 1; spec_player <attacker_slot>` (`kill_tick - 128 .. kill_tick + 112`, so shot lands at `t ≈ 2.017s`).
+   - Victim 3rd-person death is recorded with `spec_mode 2; spec_player <victim_slot>` (`kill_tick - 24 .. kill_tick + 104`, so death occurs at `t ≈ 0.375s`).
+   - Every 3D death cut (`<id>_3d.mp4`) is placed **immediately after its own `<id>_pov.mp4`**, ensuring the enemy falls in the exact same map location where the player just shot them.

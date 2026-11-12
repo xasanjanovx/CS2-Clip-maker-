@@ -54,7 +54,7 @@ def build_actions_file(
         actions.add_exec(setup_tick, "spec_show_xray 0")
         actions.add_exec(setup_tick, "mp_display_kill_assists 1")
 
-        preset_args = f"-c:v libx264 -pix_fmt yuv420p -crf {recording.crf}"
+        preset_args = f"-c:v libx264 -preset ultrafast -pix_fmt yuv420p -crf {recording.crf}"
         actions.add_exec(
             setup_tick,
             f'mirv_streams settings add ffmpeg {preset} "{preset_args} '

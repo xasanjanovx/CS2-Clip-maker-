@@ -7,10 +7,13 @@ import subprocess
 import time
 from pathlib import Path
 
+import psutil
+
 from cs2_clip_maker.highlights.config import app_data_dir
 from cs2_clip_maker.highlights.recording.sequences import to_unix_path
 from cs2_clip_maker.highlights.util.log import info
 from cs2_clip_maker.highlights.util.process import (
+    find_processes,
     kill_processes,
     wait_for_process_exit,
     wait_for_process_start,
@@ -54,7 +57,7 @@ def build_hlae_args(
     height: int,
 ) -> list[str]:
     game_args = (
-        f'-insecure -novid +playdemo "{to_unix_path(demo_path)}"'
+        f'-insecure -novid -condebug +playdemo "{to_unix_path(demo_path)}"'
         f" -width {width} -height {height} -sw"
     )
     return [
@@ -78,6 +81,8 @@ def _hlae_error_window_exists() -> bool:
         ["tasklist", "/fi", f"imagename eq {GAME_PROCESS}", "/v", "/nh"],
         capture_output=True,
         text=True,
+        encoding="cp866",
+        errors="replace",
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return "Error - AfxHookSource" in (result.stdout or "")
@@ -95,8 +100,9 @@ def run_game_with_hlae(
     """Inject, play the demo, and block until cs2.exe exits (or timeout)."""
     if kill_existing and kill_processes(GAME_PROCESS):
         info("Killed a running CS2 instance, waiting for file locks to release...")
-        time.sleep(2)
+        time.sleep(3)
 
+    old_pids = {p.pid for p in find_processes(GAME_PROCESS)}
     cfg_sandbox = app_data_dir() / "cs2-cfg"
     cfg_sandbox.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, USRLOCALCSGO=str(cfg_sandbox))
@@ -114,14 +120,42 @@ def run_game_with_hlae(
             dumps = find_minidumps_since(cs2_exe, launch_time)
             return f"\n{CRASH_ADVICE}\nMinidump: {dumps[-1]}" if dumps else ""
 
-        game = wait_for_process_start(GAME_PROCESS, timeout=30)
-        if game is None:
-            raise GameError(
-                f"CS2 did not start (or crashed immediately; launcher status {launcher.poll()}).{crash_suffix()}"
-            )
+        info("Waiting for CS2 to initialize and load assets...")
+        init_deadline = time.monotonic() + 60.0
+        real_game_pid = None
+        while time.monotonic() < init_deadline:
+            for p in find_processes(GAME_PROCESS):
+                try:
+                    rss_mb = p.memory_info().rss / (1024 * 1024)
+                    if rss_mb > 600:
+                        real_game_pid = p.pid
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            if real_game_pid is not None:
+                break
+            time.sleep(1.0)
 
-        info("CS2 is running, recording in progress (the game closes itself when done)...")
-        if not wait_for_process_exit(game, timeout=timeout_seconds):
+        if real_game_pid is None:
+            procs = find_processes(GAME_PROCESS)
+            if not procs:
+                raise GameError(
+                    f"CS2 did not start (or crashed immediately; launcher status {launcher.poll()}).{crash_suffix()}"
+                )
+            real_game_pid = procs[-1].pid
+
+        info(f"CS2 game engine active (PID {real_game_pid}), recording in progress (CS2 closes when done)...")
+        consecutive_missing = 0
+        record_deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < record_deadline:
+            if not psutil.pid_exists(real_game_pid):
+                consecutive_missing += 1
+                if consecutive_missing >= 5:
+                    break
+            else:
+                consecutive_missing = 0
+            time.sleep(1.0)
+        else:
             kill_processes(GAME_PROCESS)
             raise GameError(
                 f"Recording did not finish within {int(timeout_seconds)}s watchdog — killed CS2"
@@ -131,6 +165,7 @@ def run_game_with_hlae(
         if dumps:
             raise GameError(f"CS2 crashed during recording.{crash_suffix()}")
     finally:
+        kill_processes(GAME_PROCESS)
         if launcher.poll() is None:
             try:
                 launcher.terminate()

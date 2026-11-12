@@ -163,6 +163,10 @@ def find_plugin_dll(config: Config) -> Path | None:
 
 
 def write_ffmpeg_ini(hlae_exe: Path, ffmpeg_exe: Path) -> None:
+    clean_ffmpeg = Path(r"C:\cs2_demos\ffmpeg.exe")
+    target_exe = clean_ffmpeg if clean_ffmpeg.is_file() else ffmpeg_exe
     ini_dir = hlae_exe.parent / "ffmpeg"
     ini_dir.mkdir(parents=True, exist_ok=True)
-    (ini_dir / "ffmpeg.ini").write_text(f"[Ffmpeg]\nPath={ffmpeg_exe}", encoding="utf-8")
+    ini_content = f"[Ffmpeg]\nPath={target_exe}\n"
+    (ini_dir / "ffmpeg.ini").write_text(ini_content, encoding="utf-8")
+    (hlae_exe.parent / "ffmpeg.ini").write_text(ini_content, encoding="utf-8")

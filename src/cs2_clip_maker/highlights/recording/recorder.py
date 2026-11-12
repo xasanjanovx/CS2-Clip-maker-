@@ -13,6 +13,7 @@ from cs2_clip_maker.highlights.recording import plugin, steam, toolchain
 from cs2_clip_maker.highlights.recording.hlae import run_game_with_hlae
 from cs2_clip_maker.highlights.recording.sequences import build_actions_file
 from cs2_clip_maker.highlights.util.log import info, warn
+from cs2_clip_maker.highlights.util.process import kill_processes
 
 
 class RecordingSetupError(RuntimeError):
@@ -122,12 +123,19 @@ def record(
     if not steam.is_steam_running():
         raise RecordingSetupError("Steam is not running — start Steam and try again")
 
-    if steam.is_process_running("cs2.exe") and not kill_existing_cs2:
-        raise RecordingSetupError(
-            "An active CS2 instance (cs2.exe) is already running. Close CS2 or pass --kill-cs2 to terminate it before recording."
-        )
+    if steam.is_process_running("cs2.exe"):
+        if not kill_existing_cs2:
+            raise RecordingSetupError(
+                "An active CS2 instance (cs2.exe) is already running. Close CS2 or pass --kill-cs2 to terminate it before recording."
+            )
+        info("Terminating existing CS2 instance before installing plugin...")
+        kill_processes("cs2.exe")
+        import time
+        time.sleep(2)
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    for s in sequences:
+        (work_dir / s.name).mkdir(parents=True, exist_ok=True)
     actions = build_actions_file(demo.path, sequences, demo, config.recording, work_dir)
     actions.write()
     toolchain.write_ffmpeg_ini(tools.hlae_exe, tools.ffmpeg_exe)

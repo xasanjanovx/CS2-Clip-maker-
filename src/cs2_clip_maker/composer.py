@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from cs2_clip_maker.highlights.video.concat import concat_clips, concat_clips_with_fade
 from cs2_clip_maker.highlights.video.ffmpeg import probe_duration, probe_media, run_ffmpeg
+from cs2_clip_maker.killfeed_cutout import build_pill_overlay_chain, find_best_pills
 
 LAYOUT_DIMENSIONS = {
     "9:16": (1080, 1920),
@@ -306,7 +307,7 @@ def make_info_card(
     if y_pos is not None:
         y0 = y_pos
     elif height == 1920:
-        y0 = 1350
+        y0 = 1545
     elif height == 1350:
         y0 = 1030
     else:
@@ -345,50 +346,69 @@ def _build_video_filter(
     kf_start: float,
     src_width: int = 1920,
     src_height: int = 1080,
+    pills: list[tuple[int, int, int, int]] | None = None,
 ) -> tuple[str, int, int]:
     width, height = LAYOUT_DIMENSIONS[aspect]
-    src_norm = (
-        "[0:v]"
-        if (src_width == 1920 and src_height == 1080)
-        else "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1"
-    )
+    if src_width == 1920 and src_height == 1080:
+        norm_chain = ""
+        norm_in = "[0:v]"
+    else:
+        norm_chain = "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[v_norm];"
+        norm_in = "[v_norm]"
 
     if aspect in ("9:16", "9:16-clean"):
         show_kf = aspect == "9:16"
+        active_pills = pills if pills else [(1620, 70, 1914, 106)]
         parts = [
-            f"{src_norm}split={'3' if show_kf else '2'}[fg_raw][bg_src]" + ("[kf_src]" if show_kf else "") + ";",
-            "[bg_src]scale=108:192,boxblur=5:5,scale=1080:1920:flags=bilinear,eq=brightness=-0.16[bg];",
-            "[fg_raw]scale=1080:608:flags=lanczos[game];",
-            "[bg][game]overlay=0:656",
+            f"{norm_chain}{norm_in}split={'3' if show_kf else '2'}[fg_raw][bg_src]" + ("[kf_src]" if show_kf else "") + ";",
+            "[bg_src]crop=1400:986:200:0,scale=1080:1920:flags=bilinear,boxblur=30:8,eq=brightness=-0.10[bg];",
+            "[fg_raw]crop=1400:986:200:0,scale=1080:1124:flags=lanczos[game];",
+            "[bg][game]overlay=0:378",
         ]
         if show_kf:
             parts.append("[base];")
-            parts.append("[kf_src]crop=560:130:1340:50,scale=962:223:flags=lanczos,drawbox=x=0:y=0:w=iw:h=ih:color=white@0.35:t=2[kf];")
-            parts.append(f"[base][kf]overlay=x=(W-w)/2:y=415:enable='gte(t,{kf_start:.2f})'")
-        if has_info_card:
-            parts.append("[v_card_in];[v_card_in][2:v]overlay=0:0:enable='gte(t,0.2)'")
-        parts.append(",setsar=1,format=yuv420p[outv]")
+            parts.append("[kf_src]eq=contrast=1.08:saturation=1.15[kf_clean];")
+            parts.append(
+                build_pill_overlay_chain(
+                    active_pills,
+                    "kf_clean",
+                    "base",
+                    "v_kf_out",
+                    enable_expr=f"gte(t,{kf_start:.2f})",
+                    y_bot=360,
+                    x_right=1048,
+                    scale_kf=1.48,
+                )
+            )
+            if has_info_card:
+                parts.append(";[v_kf_out][2:v]overlay=0:0:enable='gte(t,0.2)'")
+            else:
+                parts.append(";[v_kf_out]null")
+        else:
+            if has_info_card:
+                parts.append("[v_card_in];[v_card_in][2:v]overlay=0:0:enable='gte(t,0.2)'")
+        parts.append(",fps=60,setsar=1,format=yuv420p[outv]")
         return "".join(parts), width, height
 
     if aspect == "4:5":
         parts = [
-            f"{src_norm}split=3[fg_raw][bg_src][kf_src];",
+            f"{norm_chain}{norm_in}split=3[fg_raw][bg_src][kf_src];",
             "[bg_src]scale=108:135,boxblur=5:5,scale=1080:1350:flags=bilinear,eq=brightness=-0.16[bg];",
-            "[fg_raw]scale=1080:608:flags=lanczos[game];",
+            "[fg_raw]crop=in_w:980:0:0,scale=1080:608:flags=lanczos[game];",
             "[kf_src]crop=560:130:1340:50,scale=840:195:flags=lanczos,drawbox=x=0:y=0:w=iw:h=ih:color=white@0.35:t=2[kf];",
             "[bg][game]overlay=0:371[base];",
             f"[base][kf]overlay=x=(W-w)/2:y=130:enable='gte(t,{kf_start:.2f})'",
         ]
         if has_info_card:
             parts.append("[v_card_in];[v_card_in][2:v]overlay=0:0:enable='gte(t,0.2)'")
-        parts.append(",setsar=1,format=yuv420p[outv]")
+        parts.append(",fps=60,setsar=1,format=yuv420p[outv]")
         return "".join(parts), width, height
 
     # 16:9 widescreen
-    parts = [f"{src_norm}scale=1920:1080:flags=lanczos"]
+    parts = [f"{norm_chain}{norm_in}scale=1920:1080:flags=lanczos"]
     if has_info_card:
         parts.append("[v_card_in];[v_card_in][2:v]overlay=0:0:enable='gte(t,0.2)'")
-    parts.append(",setsar=1,format=yuv420p[outv]")
+    parts.append(",fps=60,setsar=1,format=yuv420p[outv]")
     return "".join(parts), width, height
 
 
@@ -431,7 +451,8 @@ def render_manifest_video(
     skipped: list[dict] = []
     music_offset = 0.0
 
-    for clip in manifest.get("clips", []):
+    all_clips = manifest.get("clips", [])
+    for clip_idx, clip in enumerate(all_clips):
         clip_id = clip["clip_id"]
         src_video_str = clip.get("game_clip") or clip.get("raw_video")
         if not src_video_str:
@@ -467,7 +488,13 @@ def render_manifest_video(
                 accent=clip.get("accent", "cyan"),
             )
 
-        kf_start = max(0.0, float(clip.get("first_kill_offset_seconds", 1.2)) - 0.35)
+        kf_hit_t = float(clip.get("first_kill_offset_seconds", 1.8))
+        kf_start = max(0.0, min(1.0, kf_hit_t - 0.15))
+        detected_pills = (
+            find_best_pills(ffmpeg_exe, src_video, kf_hit_t, work_dir)
+            if effective_aspect == "9:16"
+            else []
+        )
 
         # Build FFmpeg inputs carefully with deterministic stream indices:
         # 0: src_video
@@ -500,6 +527,7 @@ def render_manifest_video(
             kf_start,
             src_width=int(media_info.get("width") or 1920),
             src_height=int(media_info.get("height") or 1080),
+            pills=detected_pills,
         )
 
         game_trim = f"atrim=0:{dur_s:.3f},asetpts=PTS-STARTPTS," if not inputs_audio_game_from_zero else ""
@@ -513,11 +541,19 @@ def render_manifest_video(
         mix_n = 2
 
         if music_path is not None:
-            fade_out_st = max(0.0, dur_s - 0.4)
+            is_first = (clip_idx == 0)
+            is_last = (clip_idx == len(all_clips) - 1)
+            music_fades = ""
+            if is_first:
+                music_fades += ",afade=t=in:st=0:d=0.3"
+            if is_last:
+                fade_out_st = max(0.0, dur_s - 1.2)
+                music_fades += f",afade=t=out:st={fade_out_st:.2f}:d=1.2"
+
             audio_parts.append(
                 f"[{music_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
                 f"atrim=start={music_offset:.2f}:duration={dur_s:.2f},asetpts=PTS-STARTPTS,"
-                f"volume={music_volume:.2f},afade=t=in:st=0:d=0.3,afade=t=out:st={fade_out_st:.2f}:d=0.4[snd_music];"
+                f"volume={music_volume:.2f}{music_fades}[snd_music];"
             )
             mix_inputs += "[snd_music]"
             mix_n = 3
@@ -540,6 +576,14 @@ def render_manifest_video(
                 "[outv]",
                 "-map",
                 "[outa]",
+                "-r",
+                "60",
+                "-fps_mode",
+                "cfr",
+                "-g",
+                "60",
+                "-keyint_min",
+                "60",
                 "-c:v",
                 "libx264",
                 "-preset",

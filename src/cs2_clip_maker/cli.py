@@ -19,6 +19,7 @@ from cs2_clip_maker.highlights.recording import steam, toolchain
 from cs2_clip_maker.highlights.recording.recorder import record as record_sequences, resolve_tools
 from cs2_clip_maker.highlights.video.postprocess import process_clip
 from cs2_clip_maker.presets import PRESETS, analyze_demos_to_manifest, write_manifest
+from cs2_clip_maker.template_montage import render_template_montage
 from cs2_clip_maker.voice import extract_voices_for_manifest
 
 
@@ -230,79 +231,73 @@ def _run_record(manifest: dict, args: argparse.Namespace, output_path: Path) -> 
     if not clips:
         raise ValueError("Manifest contains 0 clips to record")
 
-    by_demo: dict[str, list[dict]] = defaultdict(list)
-    for clip in clips:
-        by_demo[clip["demo_path"]].append(clip)
-
     recorded_count = 0
     failed_clips: list[dict] = []
 
-    for demo_idx, (demo_path_str, demo_clips) in enumerate(by_demo.items(), 1):
-        dem_path = Path(demo_path_str)
+    for clip_idx, c in enumerate(clips, 1):
+        dem_path = Path(c["demo_path"])
         if not dem_path.is_file():
             msg = f"Demo file missing: {dem_path}"
             if args.strict:
                 raise FileNotFoundError(msg)
-            for c in demo_clips:
-                c["record_status"] = f"error: {msg}"
-                failed_clips.append({"clip_id": c["clip_id"], "reason": msg})
+            c["record_status"] = f"error: {msg}"
+            failed_clips.append({"clip_id": c["clip_id"], "reason": msg})
+            continue
+
+        muxed_name = f"{c['clip_id']}_game.mp4"
+        existing_muxed = raw_clips_dir / muxed_name
+        if existing_muxed.is_file() and existing_muxed.stat().st_size > 1_000_000:
+            print(f"Skipping already recorded clip {c['clip_id']}: {existing_muxed}")
+            c["game_clip"] = str(existing_muxed.resolve())
+            c["record_status"] = "ok"
+            recorded_count += 1
             continue
 
         demo_data = parse_demo(dem_path)
-        seqs: list[Sequence] = []
-        seq_to_clip: dict[int, dict] = {}
-        for idx, c in enumerate(demo_clips, 1):
-            seq_num = idx
-            seqs.append(
-                Sequence(
-                    number=seq_num,
-                    start_tick=int(c["start_tick"]),
-                    end_tick=int(c["end_tick"]),
-                    cameras=[CameraAction(tick=int(c["start_tick"]), steamid=str(c["steamid"]))],
-                    label=c.get("badge", c["clip_id"]),
-                    score=float(c.get("score", 0.0)),
-                    round_index=max(0, int(c.get("round", 1)) - 1),
-                    moments=[],
-                )
-            )
-            seq_to_clip[seq_num] = c
+        seq = Sequence(
+            number=1,
+            start_tick=int(c["start_tick"]),
+            end_tick=int(c["end_tick"]),
+            cameras=[CameraAction(tick=int(c["start_tick"]), steamid=str(c["steamid"]))],
+            label=c.get("badge", c["clip_id"]),
+            score=float(c.get("score", 0.0)),
+            round_index=max(0, int(c.get("round", 1)) - 1),
+            moments=[],
+        )
 
-        demo_work_dir = work_dir / f"demo_{demo_idx:02d}_{dem_path.stem[:32]}"
+        clip_work_dir = work_dir / f"clip_{clip_idx:02d}_{c['clip_id']}"
         try:
             outputs = record_sequences(
                 demo_data,
-                seqs,
+                [seq],
                 config,
-                demo_work_dir,
+                clip_work_dir,
                 kill_existing_cs2=args.kill_cs2,
                 keep_actions=args.keep_temp,
             )
         except Exception as exc:
-            # Fail loudly for critical environment/CS2/HLAE setup failures
-            raise RuntimeError(f"Recording failed for {dem_path.name}: {exc}") from exc
+            raise RuntimeError(f"Recording failed for {c['clip_id']} ({dem_path.name}): {exc}") from exc
 
-        by_seq = {out.sequence.number: out for out in outputs}
-        for seq_num, c in seq_to_clip.items():
-            out = by_seq.get(seq_num)
-            if out is None:
-                msg = "CS2/HLAE produced no video for sequence"
-                if args.strict:
-                    raise RuntimeError(f"{c['clip_id']}: {msg}")
-                c["record_status"] = f"missing: {msg}"
-                failed_clips.append({"clip_id": c["clip_id"], "reason": msg})
-                continue
+        if not outputs:
+            msg = "CS2/HLAE produced no video for sequence"
+            if args.strict:
+                raise RuntimeError(f"{c['clip_id']}: {msg}")
+            c["record_status"] = f"missing: {msg}"
+            failed_clips.append({"clip_id": c["clip_id"], "reason": msg})
+            continue
 
-            muxed_name = f"{c['clip_id']}_game.mp4"
-            muxed = process_clip(tools.ffmpeg_exe, out, raw_clips_dir, overlay=False, filename=muxed_name)
-            c["raw_video"] = str(out.video_path.resolve())
-            c["raw_audio"] = str(out.audio_path.resolve()) if out.audio_path else None
-            c["game_clip"] = str(muxed.resolve())
-            c["record_status"] = "ok"
-            recorded_count += 1
+        out = outputs[0]
+        muxed_name = f"{c['clip_id']}_game.mp4"
+        muxed = process_clip(tools.ffmpeg_exe, out, raw_clips_dir, overlay=False, filename=muxed_name)
+        c["raw_video"] = str(out.video_path.resolve())
+        c["raw_audio"] = str(out.audio_path.resolve()) if out.audio_path else None
+        c["game_clip"] = str(muxed.resolve())
+        c["record_status"] = "ok"
+        recorded_count += 1
 
     if not args.keep_temp:
         for child in work_dir.iterdir():
-            if child.is_dir() and child.name.startswith("demo_"):
+            if child.is_dir() and (child.name.startswith("demo_") or child.name.startswith("clip_")):
                 shutil.rmtree(child, ignore_errors=True)
 
     manifest["recording"] = {
@@ -461,6 +456,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--output", required=True, type=Path, help="Final output .mp4 file path")
     p_run.add_argument("--report", type=Path, default=None, help="Final JSON report path (defaults to <output>.json)")
 
+    # --- template-montage ---
+    p_tpl = subparsers.add_parser(
+        "template-montage",
+        help="1-to-1 beat-synced vertical Reels montage from a reference video/URL and CS2 demos.",
+    )
+    p_tpl.add_argument("--template", required=True, help="Reference YouTube/Shorts URL or local .mp4 path")
+    p_tpl.add_argument("--demos", "--demo", dest="demos", nargs="+", action="extend", required=True, help="One or more .dem or .zip paths")
+    p_tpl.add_argument("--player", default=None, help="Player name or SteamID64")
+    p_tpl.add_argument("--crf", type=int, default=16, help="Output x264 CRF quality")
+    p_tpl.add_argument("--kill-cs2", action="store_true", default=True, help="Close running cs2.exe before recording")
+    p_tpl.add_argument("--work-dir", type=Path, default=None, help="Working directory")
+    p_tpl.add_argument("--output", required=True, type=Path, help="Final output .mp4 file path")
+    p_tpl.add_argument("--report", type=Path, default=None, help="Optional JSON report path")
+
     return parser
 
 
@@ -547,6 +556,21 @@ def main(argv: list[str] | None = None) -> int:
                 work_dir=base_work / "render",
             )
             _run_render(manifest, args_ren, out_mp4, report)
+            return 0
+        if args.command == "template-montage":
+            out_mp4 = Path(args.output).expanduser().resolve()
+            report = Path(args.report).expanduser().resolve() if args.report else out_mp4.with_suffix(".json")
+            res = render_template_montage(
+                template=args.template,
+                demo_inputs=[Path(p) for p in args.demos],
+                output_mp4=out_mp4,
+                player=args.player,
+                work_dir=args.work_dir,
+                kill_cs2=args.kill_cs2,
+                crf=args.crf,
+            )
+            _write_json(report, res)
+            print(f"Success! Template montage rendered -> {out_mp4}")
             return 0
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
