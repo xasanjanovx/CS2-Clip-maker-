@@ -37,6 +37,40 @@ Whenever the user provides a **template video / YouTube / Shorts link** and **CS
 
 ---
 
+## Как делать видео НЕ открывая CS2 (2 режима работы без открытия игры на экране)
+
+Очень важно: скилл поддерживает создание и пересборку видео **без открытия окна CS2 на экране пользователя** двумя способами:
+
+### Способ 1: 100% без запуска `cs2.exe` (Zero-CS2 Direct Python + FFmpeg Pipeline за ~60 секунд)
+Именно этим способом собираются и мгновенно пересобираются финальные монтажи без единого запуска игры:
+1. **Парсинг `.dem` демок без CS2 (`demoparser2`)**:
+   Все `.dem` и `.zip` архивы разбираются напрямую в Python через `demoparser2` (`select_unique_best_kills` в [`src/cs2_clip_maker/template_montage.py`](./src/cs2_clip_maker/template_montage.py)) — извлекаются точные тики убийств (`kill_tick`), слоты атакующего (`attacker_user_id + 1`) и жертвы (`user_user_id + 1`), оружие, хедшоты и ноускопы **вообще без запуска CS2**.
+2. **Сборка из кэшированных или готовых `.mp4` клипов (`--no-cs2` / `--clips-dir` / [`scripts/render_vertical_reels_no_cs2.py`](./scripts/render_vertical_reels_no_cs2.py))**:
+   - Когда сырые клипы (`<kill>_pov.mp4` и `<kill>_3d.mp4`) уже записаны в кэш (`work_dir/recorded_pairs` или любую папку `--clips-dir`), флаг `--no-cs2` (или `--clips-dir`) собирает весь вертикальный Reels **на 100% без запуска `cs2.exe`**.
+   - Детектор [`killfeed_cutout.py`](./src/cs2_clip_maker/killfeed_cutout.py) (`detect_killfeed_pills_pro`) через `FFmpeg + NumPy + Pillow` сам находит и вырезает плашки киллчата с красной рамкой прямо из кадров `.mp4` видео.
+   - `FFmpeg` выполняет двухфазный бит-синк (`trim` + `setpts` до и после `src_hit`), растягивает игровое окно `4:3` до `1080x1124` (`y = 378..1502`), накладывает размытый фон сверху и снизу (`boxblur=30:8`), добавляет вспышку, `rgbashift` и склеивает каждый POV-килл с его `1-в-1` 3D-смертью врага.
+
+```powershell
+# Сборка/пересборка монтажа ВООБЩЕ БЕЗ запуска CS2 из папки с готовыми/кэшированными клипами:
+uv run scripts/cs2_clip_maker.py template-montage `
+  --template "https://www.youtube.com/watch?v=cPdbef-JMws" `
+  --clips-dir "C:\cs2_demos\dontblink_unique_3d_clips" `
+  --no-cs2 `
+  --output outputs/DontBlink_Vertical_Reels.mp4
+
+# Либо прямой запуск автономного Zero-CS2 мастер-скрипта:
+python scripts/render_vertical_reels_no_cs2.py
+```
+
+### Способ 2: Скрытый фоновый захват `.dem` (Offscreen Background Mode — окно CS2 не появляется на экране)
+Когда на входе новые `.dem` файлы, из которых нужно впервые извлечь 3D-кадры, скилл по умолчанию (`--background`) запускает рендер **в скрытом заэкранном режиме**, чтобы окно CS2 не открывалось перед пользователем и не мешало работе:
+1. **Заэкранный запуск (`-sw -noborder -x -32000 -y -32000`) + Win32 Offscreen Hook**:
+   В [`src/cs2_clip_maker/highlights/recording/hlae.py`](./src/cs2_clip_maker/highlights/recording/hlae.py) функция `_move_process_windows_offscreen` через `user32.SetWindowPos(hwnd, 0, -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)` мгновенно уводит окно `cs2.exe` за пределы монитора без перехвата фокуса мыши/клавиатуры и без сворачивания (чтобы буфер DirectX 11 продолжал рендерить полные `1920x1080 60fps`).
+2. **Полный FPS и звук в фоне без фокуса (`engine_no_focus_sleep 0` + `snd_mute_losefocus 0`)**:
+   В [`sequences.py`](./src/cs2_clip_maker/highlights/recording/sequences.py) и [`template_montage.py`](./src/cs2_clip_maker/highlights/recording/template_montage.py) автоматически передаются квары `engine_no_focus_sleep 0` и `snd_mute_losefocus 0`, чтобы CS2 в фоновом режиме не сбрасывал частоту кадров и не глушил звук выстрелов при записи `mirv_streams`.
+
+---
+
 ## Quick Start
 
 ### 1. 1-to-1 Beat-Synced Template Montage (`template-montage`)

@@ -25,8 +25,9 @@ import wave
 import numpy as np
 
 from cs2_clip_maker.highlights.config import load_config
-from cs2_clip_maker.highlights.recording import hlae, plugin, steam
+from cs2_clip_maker.highlights.recording import hlae, plugin, toolchain
 from cs2_clip_maker.highlights.recording.recorder import resolve_tools
+from cs2_clip_maker.highlights.util.process import kill_processes
 from cs2_clip_maker.highlights.demo.parser import ensure_dem_files
 from cs2_clip_maker.highlights.video.ffmpeg import probe_duration, probe_media
 from cs2_clip_maker.killfeed_cutout import build_pill_overlay_chain, find_best_pills
@@ -232,19 +233,45 @@ def select_unique_best_kills(demo_paths: list[Path], player: str | None, needed_
     return selected
 
 
+def discover_existing_clip_pairs(clips_dir: Path, needed_count: int) -> tuple[list[dict], dict[str, dict[str, Path]]]:
+    """
+    Zero-CS2 mode: Discover pre-recorded `<base>_pov.mp4` (and matching `<base>_3d.mp4`) or `.mp4`
+    clips inside `clips_dir` so the entire montage can be rendered WITHOUT launching `cs2.exe`.
+    """
+    pov_files = sorted(clips_dir.glob("*_pov.mp4"))
+    if not pov_files:
+        pov_files = [p for p in sorted(clips_dir.glob("*.mp4")) if not p.stem.endswith("_3d")]
+    if not pov_files:
+        raise RuntimeError(f"No .mp4 clips found in --clips-dir: {clips_dir}")
+
+    selected_kills: list[dict] = []
+    pair_files: dict[str, dict[str, Path]] = {}
+    for idx in range(needed_count):
+        pov = pov_files[idx % len(pov_files)]
+        base = pov.stem[:-4] if pov.stem.endswith("_pov") else pov.stem
+        d3 = clips_dir / f"{base}_3d.mp4"
+        pid = f"cached_{idx:02d}_{base}"
+        selected_kills.append({"pair_id": pid, "src_hit": 2.017})
+        pair_files[pid] = {"pov": pov, "3d": d3}
+    return selected_kills, pair_files
+
+
 def record_pov_and_3d_pairs(
     selected_kills: list[dict],
     work_dir: Path,
     *,
     kill_cs2: bool = True,
+    background: bool = True,
+    clips_dir_override: Path | None = None,
 ) -> dict[str, dict[str, Path]]:
     """
     Record tick-exact `<key>_pov.mp4` (`spec_mode 1` on `attacker_slot`) and `<key>_3d.mp4`
-    (`spec_mode 2` on `victim_slot`) for each selected kill using CS2 + HLAE + `server.dll`.
+    (`spec_mode 2` on `victim_slot`) for each selected kill using CS2 + HLAE + `server.dll`
+    in offscreen background mode (`-sw -noborder -x -32000 -y -32000` + `engine_no_focus_sleep 0`
+    + `snd_mute_losefocus 0`) so the CS2 window never pops up on the user's screen.
+    If clips already exist in `clips_dir`, CS2 is NOT launched at all (`0` cs2.exe processes).
     """
-    config = load_config()
-    tools = resolve_tools(config, auto_install=True)
-    clips_dir = work_dir / "recorded_pairs"
+    clips_dir = (clips_dir_override or (work_dir / "recorded_pairs")).resolve()
     clips_dir.mkdir(parents=True, exist_ok=True)
 
     by_demo: dict[str, list[dict]] = defaultdict(list)
@@ -262,6 +289,8 @@ def record_pov_and_3d_pairs(
             or not (clips_dir / f"{it['pair_id']}_3d.mp4").is_file()
         ]
         if needed:
+            config = load_config()
+            tools = resolve_tools(config, auto_install=True)
             jobs: list[tuple[int, str, int, int, int, int]] = []
             for it in items:
                 kt = it["kill_tick"]
@@ -277,6 +306,8 @@ def record_pov_and_3d_pairs(
                 "tick": 32,
                 "commands": [
                     "sv_cheats 1",
+                    "engine_no_focus_sleep 0",
+                    "snd_mute_losefocus 0",
                     "cl_draw_only_deathnotices 1",
                     "demo_ui_mode 0",
                     "cl_trueview_show_status 0",
@@ -295,6 +326,8 @@ def record_pov_and_3d_pairs(
                 actions.append({
                     "tick": st - 20,
                     "commands": [
+                        "engine_no_focus_sleep 0",
+                        "snd_mute_losefocus 0",
                         "cl_draw_only_deathnotices 1",
                         "demo_ui_mode 0",
                         "cl_trueview_show_status 0",
@@ -323,20 +356,21 @@ def record_pov_and_3d_pairs(
             json_path = Path(str(dem_path) + ".json")
             json_path.write_text(json.dumps({"actions": actions}, indent=2), encoding="utf-8")
 
-            if kill_cs2 and steam.is_process_running("cs2.exe"):
-                steam.kill_process("cs2.exe")
+            if kill_cs2:
+                kill_processes("cs2.exe")
 
             plugin.install_plugin(tools.cs2_folder, tools.plugin_dll)
             try:
-                proc = hlae.launch_cs2_via_hlae(
+                hlae.run_game_with_hlae(
                     hlae_exe=tools.hlae_exe,
-                    hook_dll=tools.hook_dll,
                     cs2_exe=tools.cs2_exe,
                     demo_path=dem_path,
                     width=1920,
                     height=1080,
+                    timeout_seconds=420,
+                    kill_existing=kill_cs2,
+                    background=background,
                 )
-                hlae.wait_for_cs2_Notice_and_exit(proc, timeout_sec=420)
             finally:
                 plugin.uninstall_plugin(tools.cs2_folder)
                 if json_path.is_file():
@@ -376,26 +410,41 @@ def record_pov_and_3d_pairs(
 def render_template_montage(
     *,
     template: str,
-    demo_inputs: list[Path],
+    demo_inputs: list[Path] | None = None,
+    clips_dir: Path | None = None,
     output_mp4: Path,
     player: str | None = None,
     work_dir: Path | None = None,
     kill_cs2: bool = True,
+    background: bool = True,
+    no_cs2: bool = False,
     crf: int = 16,
 ) -> dict:
     """Run the full 1-to-1 template montage pipeline and output the vertical 9:16 Reels MP4."""
     config = load_config()
-    tools = resolve_tools(config, auto_install=True)
-    ffmpeg_exe = tools.ffmpeg_exe
+    ffmpeg_exe = toolchain.find_ffmpeg(config) or toolchain.install_ffmpeg()
 
     base_work = (work_dir or (output_mp4.parent / f"work_{output_mp4.stem}")).resolve()
     base_work.mkdir(parents=True, exist_ok=True)
 
     template_mp4 = resolve_template_video(template, base_work)
     wav_path, beat_segments = extract_template_audio_and_beats(ffmpeg_exe, template_mp4, base_work)
-    demo_paths = ensure_dem_files(demo_inputs, base_work / "demos")
-    selected_kills = select_unique_best_kills(demo_paths, player, len(beat_segments))
-    pair_files = record_pov_and_3d_pairs(selected_kills, base_work, kill_cs2=kill_cs2)
+
+    if no_cs2 or (clips_dir and not demo_inputs):
+        target_clips_dir = (clips_dir or (base_work / "recorded_pairs")).resolve()
+        selected_kills, pair_files = discover_existing_clip_pairs(target_clips_dir, len(beat_segments))
+    else:
+        if not demo_inputs:
+            raise ValueError("Provide --demos (or --clips-dir for Zero-CS2 mode).")
+        demo_paths = ensure_dem_files(demo_inputs, base_work / "demos")
+        selected_kills = select_unique_best_kills(demo_paths, player, len(beat_segments))
+        pair_files = record_pov_and_3d_pairs(
+            selected_kills,
+            base_work,
+            kill_cs2=kill_cs2,
+            background=background,
+            clips_dir_override=clips_dir,
+        )
 
     segs_dir = base_work / "rendered_segments"
     segs_dir.mkdir(parents=True, exist_ok=True)

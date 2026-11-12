@@ -11,6 +11,9 @@ from cs2_clip_maker.highlights.recording.actions_file import ActionsFile
 
 MANDATORY_COMMANDS = (
     "sv_cheats 1",
+    "engine_no_focus_sleep 0",
+    "snd_mute_losefocus 0",
+    "demo_ui_mode 0",
     "volume 1",
     "cl_hud_telemetry_frametime_show 0",
     "cl_hud_telemetry_net_misdelivery_show 0",

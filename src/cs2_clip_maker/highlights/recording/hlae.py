@@ -49,16 +49,60 @@ def find_minidumps_since(cs2_exe: Path, since_timestamp: float) -> list[Path]:
     return dumps
 
 
+def _move_process_windows_offscreen(pid: int) -> None:
+    """Move all top-level windows of `pid` offscreen (-32000, -32000) without activating or minimizing them.
+
+    Keeping the window un-minimized but at (-32000, -32000) allows Source 2's DirectX 11 swapchain
+    and `mirv_streams record` to render full 1920x1080 60fps frames while CS2 never appears on the
+    user's screen or steals keyboard/mouse focus.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        SWP_NOSIZE = 0x0001
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _enum_cb(hwnd: int, _lparam: int) -> bool:
+            if user32.IsWindowVisible(hwnd):
+                win_pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+                if win_pid.value == pid:
+                    user32.SetWindowPos(
+                        hwnd,
+                        0,
+                        -32000,
+                        -32000,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
+    except Exception:
+        pass
+
+
 def build_hlae_args(
     hlae_exe: Path,
     cs2_exe: Path,
     demo_path: Path,
     width: int,
     height: int,
+    *,
+    background: bool = True,
 ) -> list[str]:
+    pos_args = " -noborder -x -32000 -y -32000" if background else ""
     game_args = (
-        f'-insecure -novid -condebug +playdemo "{to_unix_path(demo_path)}"'
-        f" -width {width} -height {height} -sw"
+        f'-insecure -novid -nojoy -condebug +playdemo "{to_unix_path(demo_path)}"'
+        f" -width {width} -height {height} -sw{pos_args}"
     )
     return [
         str(hlae_exe),
@@ -96,6 +140,8 @@ def run_game_with_hlae(
     height: int,
     timeout_seconds: float,
     kill_existing: bool = True,
+    *,
+    background: bool = True,
 ) -> None:
     """Inject, play the demo, and block until cs2.exe exits (or timeout)."""
     if kill_existing and kill_processes(GAME_PROCESS):
@@ -108,7 +154,7 @@ def run_game_with_hlae(
     env = dict(os.environ, USRLOCALCSGO=str(cfg_sandbox))
 
     launch_time = time.time()
-    args = build_hlae_args(hlae_exe, cs2_exe, demo_path, width, height)
+    args = build_hlae_args(hlae_exe, cs2_exe, demo_path, width, height, background=background)
     launcher = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
 
     try:
@@ -120,12 +166,14 @@ def run_game_with_hlae(
             dumps = find_minidumps_since(cs2_exe, launch_time)
             return f"\n{CRASH_ADVICE}\nMinidump: {dumps[-1]}" if dumps else ""
 
-        info("Waiting for CS2 to initialize and load assets...")
+        info("Waiting for CS2 to initialize and load assets (background offscreen mode)...")
         init_deadline = time.monotonic() + 60.0
         real_game_pid = None
         while time.monotonic() < init_deadline:
             for p in find_processes(GAME_PROCESS):
                 try:
+                    if background:
+                        _move_process_windows_offscreen(p.pid)
                     rss_mb = p.memory_info().rss / (1024 * 1024)
                     if rss_mb > 600:
                         real_game_pid = p.pid
@@ -134,7 +182,7 @@ def run_game_with_hlae(
                     continue
             if real_game_pid is not None:
                 break
-            time.sleep(1.0)
+            time.sleep(0.5)
 
         if real_game_pid is None:
             procs = find_processes(GAME_PROCESS)
@@ -143,6 +191,9 @@ def run_game_with_hlae(
                     f"CS2 did not start (or crashed immediately; launcher status {launcher.poll()}).{crash_suffix()}"
                 )
             real_game_pid = procs[-1].pid
+
+        if background:
+            _move_process_windows_offscreen(real_game_pid)
 
         info(f"CS2 game engine active (PID {real_game_pid}), recording in progress (CS2 closes when done)...")
         consecutive_missing = 0
@@ -154,7 +205,9 @@ def run_game_with_hlae(
                     break
             else:
                 consecutive_missing = 0
-            time.sleep(1.0)
+                if background:
+                    _move_process_windows_offscreen(real_game_pid)
+            time.sleep(0.5)
         else:
             kill_processes(GAME_PROCESS)
             raise GameError(

@@ -459,10 +459,13 @@ def build_parser() -> argparse.ArgumentParser:
     # --- template-montage ---
     p_tpl = subparsers.add_parser(
         "template-montage",
-        help="1-to-1 beat-synced vertical Reels montage from a reference video/URL and CS2 demos.",
+        help="1-to-1 beat-synced vertical Reels montage from a reference video/URL and CS2 demos or cached clips.",
     )
     p_tpl.add_argument("--template", required=True, help="Reference YouTube/Shorts URL or local .mp4 path")
-    p_tpl.add_argument("--demos", "--demo", dest="demos", nargs="+", action="extend", required=True, help="One or more .dem or .zip paths")
+    p_tpl.add_argument("--demos", "--demo", dest="demos", nargs="+", action="extend", default=None, help="One or more .dem or .zip paths")
+    p_tpl.add_argument("--clips-dir", type=Path, default=None, help="Directory with pre-recorded/cached *_pov.mp4 and *_3d.mp4 clips (renders WITHOUT opening CS2)")
+    p_tpl.add_argument("--no-cs2", action="store_true", default=False, help="Never launch cs2.exe; assemble directly from cached/existing clips via Python + FFmpeg")
+    p_tpl.add_argument("--background", action="store_true", default=True, help="Run CS2+HLAE offscreen in the background (-x -32000 -y -32000 + engine_no_focus_sleep 0) so the CS2 window never opens on screen")
     p_tpl.add_argument("--player", default=None, help="Player name or SteamID64")
     p_tpl.add_argument("--crf", type=int, default=16, help="Output x264 CRF quality")
     p_tpl.add_argument("--kill-cs2", action="store_true", default=True, help="Close running cs2.exe before recording")
@@ -562,11 +565,14 @@ def main(argv: list[str] | None = None) -> int:
             report = Path(args.report).expanduser().resolve() if args.report else out_mp4.with_suffix(".json")
             res = render_template_montage(
                 template=args.template,
-                demo_inputs=[Path(p) for p in args.demos],
+                demo_inputs=[Path(p) for p in args.demos] if args.demos else None,
+                clips_dir=Path(args.clips_dir).expanduser().resolve() if args.clips_dir else None,
                 output_mp4=out_mp4,
                 player=args.player,
                 work_dir=args.work_dir,
                 kill_cs2=args.kill_cs2,
+                background=args.background,
+                no_cs2=args.no_cs2,
                 crf=args.crf,
             )
             _write_json(report, res)
